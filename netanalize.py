@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import sys
 import pickle
 import signal
 import multiprocessing as mp
@@ -8,17 +9,13 @@ from datetime import datetime
 from scapy.all import *
 
 try:
-    with open('sniffer.data', 'rb') as f:
-        data_new = pickle.load(f)
+    with open('sniffer.data', 'rb') as f: data_new = pickle.load(f)
 except Exception as err:
     pass
 
-iface      = "enp1s0"
-filtr      = None
-period     = 1
-sniffProc  = None
-sniffQueue = mp.SimpleQueue()
-sigExit    = False
+
+global sigExit
+sigExit  = False
 
 
 def ctrlc(signum, frame):
@@ -27,8 +24,14 @@ def ctrlc(signum, frame):
 
 
 def dosniff(iface=None, filtr=None, sniffQueue=None, period=1):
+    global sigExit
+
+    print("Sniffer: iface={}, filtr={}, sniffQueue={}, period={}".format(iface, filtr, sniffQueue, period))
+
     try:
-        t = AsyncSniffer(iface=iface, filter=filtr)
+#        t = AsyncSniffer(iface=iface, filter=filtr)
+        t = AsyncSniffer()
+        print("Start Sniffer")
         t.start()
         lastdate = datetime.now()
         while not sigExit:
@@ -40,175 +43,225 @@ def dosniff(iface=None, filtr=None, sniffQueue=None, period=1):
             lastdate = datetime.now()
         t.stop()
     except KeyboardInterrupt:
-        print("ERR: dosniff: KeyboardInterrupt")
+        print("ERR: sniffer: KeyboardInterrupt")
     except Exception as err:
-        pass
+        print(f"Error: sniffer: {err}")
 
     while not sniffQueue.empty():
         sleep(1)
+
+    print("Sniffer Stoped")
+
     return
 
 
-signal.signal(signal.SIGINT, ctrlc)
-signal.signal(signal.SIGTERM, ctrlc)
-#mp.set_start_method("fork")
+def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata):
+
+    if   isinstance(packet, scapy.layers.l2.Ether):
+        packetdata["Ether"] = {"name": packet.name, "type": packet.type, "hwsrc": packet.src, "hwdst": packet.dst, "len": len(packet)}
+
+        keyFwd += " {:5d} {:17s} -> {:17s}".format(packet.type, packet.src, packet.dst)
+        keyRev += " {:5d} {:17s} -> {:17s}".format(packet.type, packet.dst, packet.src)
+        keyLen = len(packet)
 
 
-packets = []
+    elif isinstance(packet, scapy.layers.inet6.IPv6):
+        packetdata["IPv6"] = {"name": packet.name, "ipsrc": packet.src, "ipdst": packet.dst, "iplen": packet.plen, "proto": packet.nh}
 
-traff  = {}
-revref = {}
+        keyFwd += " IPv6: {:3d} {:17s} -> {:17s}".format(packet.nh, packet.src, packet.dst)
+        keyRev += " IPv6: {:3d} {:17s} -> {:17s}".format(packet.nh, packet.dst, packet.src)
 
-duration = 0.
+    elif isinstance(packet, scapy.layers.inet.UDP):
+        packetdata["UDP"] = {"name": packet.name, "sport": packet.sport, "dport": packet.dport}
 
-try:
-#if True:
-    while not sigExit:
-        sleep(0.5)
-        if sniffProc is None or not sniffProc.is_alive():
-            if not sigExit:
-                try:
-                    sniffQueue = mp.SimpleQueue()
-                    sniffProc  = mp.Process(target=dosniff, args=(iface, filtr, sniffQueue, period), group=None, name=None, daemon=False)
-                    sniffProc.start()
-                    print(f"Start Sniffer...")
-                except Exception as err:
-                    print(f"Error Start Process for sniff: {err}")
+        keyFwd += " UDP: {:5d} -> {:5d}".format(packet.sport, packet.dport)
+        keyRev += " UDP: {:5d} -> {:5d}".format(packet.dport, packet.sport)
 
-        if sniffProc.is_alive():
-            if not sniffQueue.empty():
-                captured = sniffQueue.get()
-                duration += captured["delta"]
-                print("Get {} packets for {} sec".format(len(captured["packets"]), captured["delta"]))
-                for packet in captured["packets"]:
-                    packetdata = {}
-                    keyFwd = ""
-                    keyRev = ""
-                    keyLen = 0
-                    if isinstance(packet, scapy.layers.l2.Ether):
-                        packetdata = {"name": packet.name, "type": packet.type, "hwsrc": packet.src, "hwdst": packet.dst, "len": len(packet)}
+    elif isinstance(packet, scapy.layers.inet.TCP):
+        packetdata["TCP"] = {"name": packet.name, "sport": packet.sport, "dport": packet.dport}
 
-                        keyFwd += " "+" ".join([str(packet.type), packet.src, packet.dst])
-                        keyRev += " "+" ".join([str(packet.type), packet.dst, packet.src])
-                        keyLen = len(packet)
+        keyFwd += " TCP: {:5d} -> {:5d}".format(packet.sport, packet.dport)
+        keyRev += " TCP: {:5d} -> {:5d}".format(packet.dport, packet.sport)
 
-                        EtherPayload = packet.payload
+    elif isinstance(packet, scapy.layers.inet6.ICMPv6ND_RS):
+        packetdata["ICMPv6ND_RS"] = {"name": packet.name}
 
-                        if   isinstance(EtherPayload, scapy.layers.inet6.IPv6):
-                            packetdata["type"] = EtherPayload.name
-                            packetdata[EtherPayload.name] = {"ipsrc": EtherPayload.src, "ipdst": EtherPayload.dst, "iplen": EtherPayload.plen, "proto": EtherPayload.nh}
+        keyFwd += " ICMPv6ND_RS"
+        keyRev += " ICMPv6ND_RS"
 
-                            keyFwd += " "+" ".join([str(EtherPayload.nh), EtherPayload.src, EtherPayload.dst])
-                            keyRev += " "+" ".join([str(EtherPayload.nh), EtherPayload.dst, EtherPayload.src])
+    elif isinstance(packet, scapy.layers.inet.ICMP):
+        packetdata["ICMP"] = {"name": packet.name}
 
-                            IpPayload = EtherPayload.payload
+        keyFwd += " ICMP"
+        keyRev += " ICMP"
 
-                            if   isinstance(IpPayload, scapy.layers.inet.UDP):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
-                                packetdata[IpPayload.name] = {"sport": IpPayload.sport, "dport": IpPayload.dport}
+    elif isinstance(packet, scapy.layers.inet.IP):
+        packetdata["IPv4"] = {"name": packet.name, "ipsrc": packet.src, "ipdst": packet.dst, "iplen": packet.len, "proto": packet.proto}
 
-                                keyFwd += " "+" ".join([str(IpPayload.sport), str(IpPayload.dport)])
-                                keyRev += " "+" ".join([str(IpPayload.dport), str(IpPayload.sport)])
+        keyFwd += " IPv4: {:3d} {:15s} -> {:15s}".format(packet.proto, packet.src, packet.dst)
+        keyRev += " IPv4: {:3d} {:15s} -> {:15s}".format(packet.proto, packet.dst, packet.src)
 
-                            elif isinstance(IpPayload, scapy.layers.inet.TCP):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
-                                packetdata[IpPayload.name] = {"sport": IpPayload.sport, "dport": IpPayload.dport}
+    elif isinstance(packet, scapy.layers.l2.ARP):
+        packetdata["ARP"] = {"name": packet.name, "ipsrc": packet.psrc, "ipdst": packet.pdst}
 
-                                keyFwd += " "+" ".join([str(IpPayload.sport), str(IpPayload.dport)])
-                                keyRev += " "+" ".join([str(IpPayload.dport), str(IpPayload.sport)])
+        keyFwd += " ARP: {} -> {}".format(packet.psrc, packet.pdst)
+        keyRev += " ARP: {} -> {}".format(packet.pdst, packet.psrc)
 
-                            elif isinstance(IpPayload, scapy.layers.inet6.ICMPv6ND_RS):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
+    elif isinstance(EtherPayload, scapy.packet.Raw):
+        pass
 
-                            else:
-                                print("ERR: Unknown IP proto: {}: {}".format(type(IpPayload), IpPayload))
+    elif isinstance(packet, scapy.layers.l2.Dot3):
+        packetdata = {"name": packet.name, "type": packet.payload.name, "hwsrc": packet.src, "hwdst": packet.dst, "len": len(packet)}
 
-                        elif isinstance(EtherPayload, scapy.layers.inet.IP):
-                            packetdata["type"] = EtherPayload.name
-                            packetdata[EtherPayload.name] = {"ipsrc": EtherPayload.src, "ipdst": EtherPayload.dst, "iplen": EtherPayload.len, "proto": EtherPayload.proto}
+        keyFwd += " {}: {}: {}: {} -> {}".format(packet.name, packet.payload.name, packet.src, packet.dst)
+        keyRev += " {}: {}: {}: {} -> {}".format(packet.name, packet.payload.name, packet.dst, packet.src)
+        keyLen = len(packet)
 
-                            keyFwd += " "+" ".join([str(EtherPayload.proto), EtherPayload.src, EtherPayload.dst])
-                            keyRev += " "+" ".join([str(EtherPayload.proto), EtherPayload.dst, EtherPayload.src])
+    else:
+        print("ERR: Unknown packet: {}: {}".format(type(packet), packet))
 
-                            IpPayload = EtherPayload.payload
 
-                            if   isinstance(IpPayload, scapy.layers.inet.UDP):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
-                                packetdata[IpPayload.name] = {"sport": IpPayload.sport, "dport": IpPayload.dport}
+def outdata(traff, revref, duration, lines):
+    outlines = []
+    used = set()
+    i = 0
+    for key in reversed(sorted(list(traff.keys()), key=traff.__getitem__)):
+        if key in used:
+            continue
+        i += 1
+        used.add(key)
+        revkey = revref[key]
+        used.add(revkey)
+        outlines.append('{} кбит/с, {} кбит/с, {}'.format(int(800*traff[key]/1000/duration)/100, int(800*traff[revkey]/1000/duration)/100, key))
+        if i > lines:
+            break
+    print("\n\n\n")
+    for x in reversed(outlines):
+        print(x)
 
-                                keyFwd += " "+" ".join([str(IpPayload.sport), str(IpPayload.dport)])
-                                keyRev += " "+" ".join([str(IpPayload.dport), str(IpPayload.sport)])
 
-                            elif isinstance(IpPayload, scapy.layers.inet.TCP):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
-                                packetdata[IpPayload.name] = {"sport": IpPayload.sport, "dport": IpPayload.dport}
+def analize(packets, traff, revref, sniffed):
 
-                                keyFwd += " "+" ".join([str(IpPayload.sport), str(IpPayload.dport)])
-                                keyRev += " "+" ".join([str(IpPayload.dport), str(IpPayload.sport)])
+    global sigExit
 
-                            elif isinstance(IpPayload, scapy.layers.inet.ICMP):
-                                packetdata[EtherPayload.name]["proto"] = IpPayload.name
+    for packet in sniffed:
+        if sigExit:
+            break
 
-                            else:
-                                print("ERR: Unknown IP proto: {}: {}".format(type(IpPayload), IpPayload))
+        keyFwd = ""
+        keyRev = ""
+        keyLen = 0
 
-                        elif isinstance(EtherPayload, scapy.layers.l2.ARP):
-                            packetdata["type"] = EtherPayload.name
-                            packetdata[EtherPayload.name] = {"ipsrc": EtherPayload.psrc, "ipdst": EtherPayload.pdst}
+        packetdata = {}
 
-                            keyFwd += " "+" ".join([EtherPayload.psrc, EtherPayload.pdst])
-                            keyRev += " "+" ".join([EtherPayload.pdst, EtherPayload.psrc])
+        while not isinstance(packet, scapy.packet.NoPayload):
+            getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata)
+            packet = packet.payload
 
-                        elif isinstance(EtherPayload, scapy.packet.Raw):
-                            pass
+        if keyFwd not in traff:
+            traff[keyFwd] = 0
+            traff[keyRev] = 0
+            revref[keyFwd] = keyRev
+            revref[keyRev] = keyFwd
+        traff[keyFwd] += keyLen
 
-                        else:
-                            print("ERR: Unknown Type of Ethernet packet: {}: {}".format(type(EtherPayload), EtherPayload))
+    return
 
-                    elif isinstance(packet, scapy.layers.l2.Dot3):
-                        packetdata = {"name": packet.name, "type": packet.payload.name, "hwsrc": packet.src, "hwdst": packet.dst, "len": len(packet)}
 
-                        keyFwd += " "+" ".join([packet.payload.name, packet.src, packet.dst])
-                        keyRev += " "+" ".join([packet.payload.name, packet.dst, packet.src])
-                        keyLen = len(packet)
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, ctrlc)
+    signal.signal(signal.SIGTERM, ctrlc)
+    mp.set_start_method('fork')
 
-                    else:
-                        print("ERR: Unknown packet: {}: {}".format(type(packet), packet))
+    iface      = None
+    filtr      = None
+    period     = 1
+    lines      = 20
+    cont       = False
 
-                  if keyFwd not in traff:
-                        traff[keyFwd] = 0
-                        traff[keyRev] = 0
-                        revref[keyFwd] = keyRev
-                        revref[keyRev] = keyFwd
-                    traff[keyFwd] += keyLen
-                outlines = []
-                used = set()
-                i = 0
-                for key in reversed(sorted(list(traff.keys()), key=traff.__getitem__)):
-                    if key in used:
-                        continue
+    lenargv = len(sys.argv)
+    if lenargv > 1:
+        i = 1
+        while(i<lenargv):
+            if sys.argv[i] == '-i' and i+1 < lenargv:
+                iface = sys.argv[i+1].split(',')
+                if len(iface) == 1:
+                    iface = iface[0]
+                i += 1
+
+            elif sys.argv[i] == '-p' and i+1 < lenargv:
+                if sys.argv[i+1].isdecimal():
+                    period = int(sys.argv[i+1])
                     i += 1
-                    used.add(key)
-                    revkey = revref[key]
-                    used.add(revkey)
-                    outlines.append('{} кбит/с, {} кбит/с, {}'.format(int(800*traff[key]/1000/duration)/100, int(800*traff[revkey]/1000/duration)/100, key))
-                    if i > 10:
-                        break
-                print("\n\n\n")
-                for x in reversed(outlines):
-                    print(x)
+                else:
+                    print("Error: Period must be decimal")
+                    exit()
 
-except Exception as err:
-    print(f"ERR: main: {err}")
-    if sniffProc is not None and sniffProc.is_alive():
+            elif sys.argv[i] == '-l' and i+1 < lenargv:
+                if sys.argv[i+1].isdecimal():
+                    lines = int(sys.argv[i+1])
+                    i += 1
+                else:
+                    print("Error: Lines num must be decimal")
+                    exit()
+
+            elif sys.argv[i] == '-c':
+                cont = True
+
+            elif sys.argv[i] == '-h':
+                helpmess()
+                exit()
+
+            else:
+                filtr = " ".join(sys.argv[i:])
+                break
+
+            i +=1
+
+    try:
+        packets = []
+
+        traff  = {}
+        revref = {}
+
+        duration = 0.
+
+        sniffQueue = mp.SimpleQueue()
+        sniffProc  = mp.Process(target=dosniff, args=(iface, filtr, sniffQueue, period), group=None, name=None, daemon=False)
+        sniffProc.start()
+
+        try:
+            while sigExit:
+                if cont:
+                    traff  = {}
+                sleep(0.5)
+                newdata = False
+                if sniffProc.is_alive():
+                    while not sniffQueue.empty():
+                        newdata = True
+                        captured = sniffQueue.get()
+                        duration += captured["delta"]
+                        print("Get {} packets for {} sec".format(len(captured["packets"]), captured["delta"]))
+                        analize(packets, traff, revref, captured["packets"])
+                if newdata:
+                    outdata(traff, revref, duration, lines)
+
+        except Exception as err:
+            print(f"Error: {err}")
+
         sniffProc.terminate()
 
-while sniffProc is not None and sniffProc.is_alive():
-    if not sniffQueue.empty():
-        captured = sniffQueue.get()
-    sleep(1)
+        while sniffProc.is_alive():
+            if not sniffQueue.empty():
+                captured = sniffQueue.get()
+            sleep(1)
+        sniffProc.join()
 
-with open('sniffer.data', 'wb') as f:
-    pickle.dump(packets, f)
+    except Exception as err:
+        print(f"Error: {err}")
 
-sniffProc.join()
+    try:
+        print("Save data.")
+        with open('sniffer.data', 'wb') as f: pickle.dump(packets, f)
+    except Exception as err:
+        print(f"Error: {err}")
