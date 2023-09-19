@@ -88,6 +88,24 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
 
         stop = False
 
+    elif isinstance(packet, scapy.layers.ppp.PPP):
+        packetdata["PPP"] = {"name": packet.name, "proto": packet.proto}
+
+        keyFwd += " PPP: {:3d}".format(packet.proto)
+        keyRev += " PPP: {:3d}".format(packet.proto)
+
+        stop = False
+
+    elif isinstance(packet, scapy.layers.ppp.PPPoE):
+        packetdata["PPPoE"] = {"name": packet.name, "sessionid": packet.sessionid, "len": packet.len}
+
+        keyFwd += " PPPoE:"
+        keyRev += " PPPoE:"
+        if keyLen == 0:
+            keyLen = len(packet)
+
+        stop = False
+
     elif isinstance(packet, scapy.layers.inet.IP):
         packetdata["IPv4"] = {"name": packet.name, "ipsrc": packet.src, "ipdst": packet.dst, "iplen": packet.len, "proto": packet.proto}
 
@@ -107,6 +125,56 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
             keyLen = packet.plen
 
         stop = False
+
+    elif isinstance(packet, scapy.layers.inet6.IPv6ExtHdrHopByHop):
+        packetdata["IPv6ExtHdrHopByHop"] = {"name": packet.name}
+
+        keyFwd += " IPv6ExtHdrHopByHop:"
+        keyRev += " IPv6ExtHdrHopByHop:"
+
+        stop = True
+
+    elif isinstance(packet, scapy.layers.inet6.IPv6ExtHdrFragment):
+        packetdata["IPv6ExtHdrFragm"] = {"name": packet.name, "proto": packet.nh}
+
+        keyFwd += " IPv6ExtHdrFragm: {:3d}".format(packet.nh)
+        keyRev += " IPv6ExtHdrFragm: {:3d}".format(packet.nh)
+
+        stop = False
+
+    elif isinstance(packet, scapy.layers.inet6.ICMPv6TimeExceeded):
+        packetdata["ICMPv6TimeExceeded"] = {"name": packet.name}
+
+        keyFwd += " ICMPv6TOut:"
+        keyRev += " ICMPv6TOut:"
+
+        stop = False
+
+    elif isinstance(packet, scapy.layers.ipsec.ESP):
+        packetdata["ESP"] = {"name": packet.name}
+
+        keyFwd += " IPSec.ESP:"
+        keyRev += " IPSec.ESP:"
+
+        stop = True
+
+    elif isinstance(packet, scapy.layers.inet6.IPerror6):
+        packetdata["IPerror6"] = {"name": packet.name, "proto": packet.nh, "src": packet.src, "dst": packet.dst}
+
+        keyFwd += " IPv6Err: {:3d} {:26s} -> {:26s}".format(packet.nh, packet.src, packet.dst)
+        keyRev += " IPv6Err: {:3d} {:26s} -> {:26s}".format(packet.nh, packet.dst, packet.src)
+
+        stop = False
+
+    elif isinstance(packet, scapy.layers.sctp.SCTP):
+        packetdata["SCTP"] = {"name": packet.name, "sport": packet.sport, "dport": packet.dport}
+
+        keyFwd += " {}: {:5d} -> {:5d}".format(packet.name, packet.sport, packet.dport)
+        keyRev += " {}: {:5d} -> {:5d}".format(packet.name, packet.dport, packet.sport)
+        if keyLen == 0:
+            keyLen = len(packet)
+
+        stop = True
 
     elif isinstance(packet, scapy.layers.inet.UDP):
         packetdata["UDP"] = {"name": packet.name, "sport": packet.sport, "dport": packet.dport}
@@ -128,11 +196,19 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
 
         stop = True
 
+    elif isinstance(packet, scapy.layers.inet6.ICMPv6ND_NA):
+        packetdata["ICMPv6ND_NA"] = {"name": packet.name, "tgt": packet.tgt}
+
+        keyFwd += " ICMPv6ND_NA: tgt={}".format(packet.tgt)
+        keyRev += " ICMPv6ND_NA: tgt={}".format(packet.tgt)
+
+        stop = False
+
     elif isinstance(packet, scapy.layers.inet6.ICMPv6ND_NS):
         packetdata["ICMPv6ND_NS"] = {"name": packet.name, "tgt": packet.tgt}
 
         keyFwd += " ICMPv6ND_NS: tgt={}".format(packet.tgt)
-        keyRev += "-ICMPv6ND_NS: tgt={}".format(packet.tgt)
+        keyRev += " ICMPv6ND_NS: tgt={}".format(packet.tgt)
 
         stop = False
 
@@ -140,7 +216,7 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
         packetdata["ICMPv6NDOptSrcLLAddr"] = {"name": packet.name, "lladdr": packet.lladdr}
 
         keyFwd += " ICMPv6NDOptSrcLLAddr: lladdr={}".format(packet.lladdr)
-        keyRev += "-ICMPv6NDOptSrcLLAddr: lladdr={}".format(packet.lladdr)
+        keyRev += " ICMPv6NDOptSrcLLAddr: lladdr={}".format(packet.lladdr)
         if keyLen == 0:
             keyLen = len(packet)
 
@@ -180,7 +256,7 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
         packetdata["LLC"] = {"name": packet.name, "dsap": packet.dsap, "ssap": packet.ssap, "ctrl": packet.ctrl}
 
         keyFwd += " LLC: dsap={} ssap={} ctrl={}".format(packet.dsap, packet.ssap, packet.ctrl)
-        keyRev += "-LLC: dsap={} ssap={} ctrl={}".format(packet.dsap, packet.ssap, packet.ctrl)
+        keyRev += " LLC: dsap={} ssap={} ctrl={}".format(packet.dsap, packet.ssap, packet.ctrl)
         if keyLen == 0:
             keyLen = len(packet)
 
@@ -190,7 +266,7 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
         packetdata["STP"] = {"name": packet.name, "rootid": packet.rootid, "rootmac": packet.rootmac, "bridgeid": packet.bridgeid, "bridgemac": packet.bridgemac, "portid": packet.portid}
 
         keyFwd += " STP: rootid={} rootmac={} bridgeid={} bridgemac={} portid={}".format(packet.rootid, packet.rootmac, packet.bridgeid, packet.bridgemac, packet.bridgemac)
-        keyRev += "-STP: rootid={} rootmac={} bridgeid={} bridgemac={} portid={}".format(packet.rootid, packet.rootmac, packet.bridgeid, packet.bridgemac, packet.bridgemac)
+        keyRev += " STP: rootid={} rootmac={} bridgeid={} bridgemac={} portid={}".format(packet.rootid, packet.rootmac, packet.bridgeid, packet.bridgemac, packet.bridgemac)
         if keyLen == 0:
             keyLen = len(packet)
 
@@ -200,7 +276,7 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
         packetdata["SNAP"] = {"name": packet.name, "oui": packet.OUI, "code": packet.code}
 
         keyFwd += " SNAP: oui={} code={}".format(packet.OUI, packet.code)
-        keyRev += "-SNAP: oui={} code={}".format(packet.OUI, packet.code)
+        keyRev += " SNAP: oui={} code={}".format(packet.OUI, packet.code)
         if keyLen == 0:
             keyLen = len(packet)
 
@@ -222,7 +298,7 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
 
     else:
         keyFwd += " UNKNOWN"
-        keyRev += "-UNKNOWN"
+        keyRev += " UNKNOWN"
         if keyLen == 0:
             keyLen = len(packet)
 
@@ -318,10 +394,10 @@ def main(iface, filtr, period, lines, cont):
                     while not sniffQueue.empty():
                         newdata = True
                         captured = sniffQueue.get()
-                        duration += captured["delta"]
-                        print("Get {} packets for {} sec".format(len(captured["packets"]), captured["delta"]))
-                        analize(packets, traff, revref, captured["packets"])
                 if newdata:
+                    duration += captured["delta"]
+                    print("Get {} packets for {} sec".format(len(captured["packets"]), captured["delta"]))
+                    analize(packets, traff, revref, captured["packets"])
                     outdata(traff, revref, lines, duration)
 
         except Exception as err:
