@@ -3,58 +3,22 @@
 import sys
 import pickle
 import signal
-import multiprocessing as mp
+import subprocess
 from time import sleep
 from datetime import datetime
 from scapy.all import *
 
-try:
-    with open('sniffer.data', 'rb') as f: data_new = pickle.load(f)
-except Exception as err:
-    pass
 
-
-sigExit  = False
-
+sigExit = False
 
 def ctrlc(signum, frame):
-
     global sigExit
     sigExit = True
 
 
-def dosniff(iface=None, filtr=None, sniffQueue=None, period=1):
+def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
 
     global sigExit
-
-    try:
-        print("Start Sniffer")
-        t = AsyncSniffer(iface=iface, filter=filtr)
-        t.start()
-        lastdate = datetime.now()
-        sleep(period)
-        while not sigExit:
-            t.stop()
-            delta = datetime.now()-lastdate
-            sniffQueue.put({"delta": delta.total_seconds(), "packets": t.results})
-            t.start()
-            lastdate = datetime.now()
-            sleep(period)
-        t.stop()
-    except KeyboardInterrupt:
-        print(f"Error: sniffer: KeyboardInterrupt")
-    except Exception as err:
-        print(f"Error: sniffer: {err}")
-
-    while not sniffQueue.empty():
-        sleep(1)
-
-    print("Sniffer Stoped")
-
-    return
-
-
-def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
 
     stop = True
 
@@ -302,9 +266,9 @@ def getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets):
         if keyLen == 0:
             keyLen = len(packet)
 
-        print("ERR: Unknown packet: {}: {}".format(type(packet), packet))
-        packets.append(packet)
-        print("Store in packets under index", len(packets)-1)
+#        print("ERR: Unknown packet: {}: {}".format(type(packet), packet))
+#        packets.append(packet)
+#        print("Store in packets under index", len(packets)-1)
 
         stop = True
 
@@ -318,27 +282,29 @@ def outdata(traff, revref, lines, duration):
     for key in reversed(sorted(list(traff.keys()), key=traff.__getitem__)):
         if key in used:
             continue
-        i += 1
         used.add(key)
         revkey = revref[key]
         used.add(revkey)
         outlines.append('{:9.2f} kbit/s, {:9.2f} kbit/s, {}'.format(8*traff[key]/1000/duration, 8*traff[revkey]/1000/duration, key))
+
+        i += 1
         if i > lines:
             break
-    while len(outlines) < lines+3:
+    while len(outlines) < lines+1:
         outlines.append("")
     for x in reversed(outlines):
         print(x)
-    print('SUMMARY: {:10.2f} Mbit/s'.format(8*sum(list(traff.values()))/1000000/duration))
+    print('SUMMARY: {:10.2f} Mbit/s for {:5.2f} sec'.format(8*sum(list(traff.values()))/1000000/duration, duration))
 
     return
 
 
-def analize(packets, traff, revref, sniffed):
+def analize(rampath, packets, traff, revref):
 
     global sigExit
 
-    for packet in sniffed:
+    print("Analizing... ", end="")
+    for packet in sniff(offline=rampath+"/netdump.pcap"):
         if sigExit:
             break
 
@@ -349,6 +315,8 @@ def analize(packets, traff, revref, sniffed):
         packetdata = {}
 
         while True:
+            if sigExit:
+                break
             stop, keyFwd, keyRev, keyLen = getpkginfo(keyFwd, keyRev, keyLen, packet, packetdata, packets)
             if stop:
                 break
@@ -361,62 +329,129 @@ def analize(packets, traff, revref, sniffed):
             revref[keyRev] = keyFwd
         traff[keyFwd] += keyLen
 
+    print("Done. ")
     return
 
 
-def main(iface, filtr, period, lines, cont):
-    signal.signal(signal.SIGINT, ctrlc)
-    signal.signal(signal.SIGTERM, ctrlc)
-    mp.set_start_method('fork')
+def ramPathDir(cmd, rampath):
+
+    ret = True
+
+    if cmd:
+        if not os.path.isdir(rampath):
+            try:
+                os.mkdir(rampath, mode=0o300, dir_fd=None)
+            except Exception as err:
+                ret = False
+    else:
+        if os.path.isdir(rampath):
+            try:
+                os.rmdir(rampath)
+            except Exception as err:
+                pass
+        if os.path.isdir(rampath):
+            ret = False
+
+    return ret
+
+
+def ramMountDir(cmd, ramvol, rampath):
+
+    ret = False
+
+    if cmd:
+        rescmd = subprocess.run(["mount", "-t", "tmpfs", "-o", "size="+ramvol, "ramdisk", rampath], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rescmd = subprocess.run(['df', '-k', rampath], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for line in rescmd.stdout.decode('utf-8').split('\n'):
+            parts = line.strip().split()
+            if len(parts) > 0:
+                if parts[-1] == rampath:
+                    ret = True
+    else:
+        ret = True
+        rescmd = subprocess.run(["umount", rampath], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        rescmd = subprocess.run(['df', '-k', rampath], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for line in rescmd.stdout.decode('utf-8').split('\n'):
+            parts = line.strip().split()
+            if len(parts) > 0:
+                if parts[-1] == rampath:
+                    ret = False
+    return ret
+
+def netCapture(rampath, iface, filtr, period):
+
+    info = ""
+    error = ""
+
+    tcpdump = ["tcpdump", "--immediate-mode", "--dont-verify-checksums", "--packet-buffered", "-w", rampath+"/netdump.pcap", "-G", period, "-W", "1"]
+
+    if iface is not None:
+        tcpdump.extend(["-i", iface])
+
+    if filtr is not None:
+        tcpdump.extend(filtr.split())
+
+    rescmd = subprocess.run(['df', '-k', rampath], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for line in rescmd.stdout.decode('utf-8').split('\n'):
+        parts = line.strip().split()
+        if len(parts) > 0:
+            if parts[-1] == rampath:
+                if parts[-2] == "100%" or parts[-2][0] == "9":
+                    print("Emeggency: RAM Disk is Full. Increase it by -m key.\nExammple:\n\t-m 500m - for 500 Mbyste\n\t-m 5G - for 5 Gbytes")
+
+
+    rescmd = subprocess.run(["rm", "-rf", rampath+"/netdump.pcap"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    info += " ".join(tcpdump)+"\n"
+    print("Start sniffing...", end="")
+    lastdate = datetime.now()
+    rescmd = subprocess.run(tcpdump, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    delta = datetime.now()-lastdate
+    print("Sniffing stopped.", end="")
+    for x in rescmd.stdout.decode('utf-8').split("\n"):
+        print(x+" ", end="")
+#    info += rescmd.stdout.decode('utf-8')+"\n"
+#    info += rescmd.stderr.decode('utf-8')+"\n"
+
+    return delta.total_seconds(), info, error
+
+def main(iface, filtr, period, lines, cont, ramvol, rampath):
 
     global sigExit
 
-    try:
-        packets = []
+    if not ramPathDir(True, rampath):
+        exit()
 
-        traff  = {}
-        revref = {}
-        duration = 0.
+    if ramMountDir(True, ramvol, rampath):
+        print(f"Info: {ramvol} RAM Disk is mounted to {rampath}")
+    else:
+        print("Warning: RAM Disk is not mounted")
 
-        sniffQueue = mp.SimpleQueue()
-        sniffProc  = mp.Process(target=dosniff, args=(iface, filtr, sniffQueue, period), group=None, name=None, daemon=False)
-        sniffProc.start()
-
-        try:
-            while not sigExit:
-                if cont:
-                    traff  = {}
-                    revref = {}
-                    duration = 0.
-                sleep(0.5)
-                newdata = False
-                if sniffProc.is_alive():
-                    while not sniffQueue.empty():
-                        newdata = True
-                        captured = sniffQueue.get()
-                if newdata:
-                    duration += captured["delta"]
-                    print("Get {} packets for {} sec".format(len(captured["packets"]), captured["delta"]))
-                    analize(packets, traff, revref, captured["packets"])
-                    outdata(traff, revref, lines, duration)
-
-        except Exception as err:
-            print(f"Error: main: circle: {err}")
-
-        sniffProc.terminate()
-
-        while sniffProc.is_alive():
-            if not sniffQueue.empty():
-                captured = sniffQueue.get()
-            sleep(1)
-        sniffProc.join()
-
-    except Exception as err:
-        print(f"Error: main: {err}")
+    packets = []
+    traff  = {}
+    revref = {}
+    duration = 0.
 
     try:
-        print("Save data.")
-        with open('sniffer.data', 'wb') as f: pickle.dump(packets, f)
+        while not sigExit:
+            sleep(0.5)
+            if cont:
+                traff  = {}
+                revref = {}
+                duration = 0.
+            delta, info, error = netCapture(rampath, iface, filtr, period)
+            duration += delta
+            analize(rampath, packets, traff, revref)
+            print("Duration: {:5.2f} sec".format(delta))
+            print(info)
+            outdata(traff, revref, lines, duration)
+            print(error)
+
+    except KeyboardInterrupt:
+        print(f"Info: Unmount RAM Disk {rampath}")
+        ramMountDir(False, ramvol, rampath)
+        print(f"Info: Remove temporary Path {rampath}")
+        ramPathDir(False, rampath)
+
     except Exception as err:
         print(f"Error: main: {err}")
 
@@ -432,23 +467,27 @@ if __name__ == '__main__':
 
     iface      = None
     filtr      = None
-    period     = 1
+    period     = "1"
     lines      = 20
     cont       = False
+    ramvol     = '150m'
+    rampath    = '/tmp/netanalizer'
+
+    signal.signal(signal.SIGINT, ctrlc)
+    signal.signal(signal.SIGTERM, ctrlc)
 
     lenargv = len(sys.argv)
     if lenargv > 1:
         i = 1
         while(i<lenargv):
+
             if sys.argv[i] == '-i' and i+1 < lenargv:
-                iface = sys.argv[i+1].split(',')
-                if len(iface) == 1:
-                    iface = iface[0]
+                iface = sys.argv[i+1]
                 i += 1
 
             elif sys.argv[i] == '-p' and i+1 < lenargv:
                 if sys.argv[i+1].isdecimal():
-                    period = int(sys.argv[i+1])
+                    period = sys.argv[i+1]
                     i += 1
                 else:
                     print("Error: Period must be decimal")
@@ -461,6 +500,14 @@ if __name__ == '__main__':
                 else:
                     print("Error: Lines num must be decimal")
                     exit()
+
+            elif sys.argv[i] == '-m' and i+1 < lenargv:
+                ramvol = sys.argv[i+1]
+                i += 1
+
+            elif sys.argv[i] == '-t' and i+1 < lenargv:
+                ramvol = sys.argv[i+1]
+                i += 1
 
             elif sys.argv[i] == '-c':
                 cont = True
@@ -475,4 +522,4 @@ if __name__ == '__main__':
 
             i +=1
 
-    main(iface, filtr, period, lines, cont)
+    main(iface, filtr, period, lines, cont, ramvol, rampath)
